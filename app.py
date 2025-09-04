@@ -1,3 +1,4 @@
+import math
 import streamlit as st
 import pandas as pd
 from datetime import date
@@ -5,17 +6,30 @@ from dateutil.relativedelta import relativedelta
 
 st.set_page_config(page_title="Calculadora de Revisões", page_icon="🔧", layout="centered")
 st.title("🔧 Calculadora de Revisões de Veículos")
-st.caption("Informe a data de compra (e opcionalmente km atual) para ver o cronograma de revisões.")
+st.caption("Informe a data de compra (e opcionalmente km atual) para ver o cronograma. "
+           "Se informado, a quilometragem só antecipa a revisão se ocorrer ANTES da data oficial (o que ocorrer primeiro).")
 
-# Entrada da data de compra
-data_compra = st.date_input("📅 Selecione a data de compra:", format="DD/MM/YYYY")
+# ---------- Entradas ----------
+data_compra = st.date_input("📅 Data de compra:", format="DD/MM/YYYY")
 
-# Campos opcionais
-km_atual = st.number_input("📍 Quilometragem atual (opcional)", min_value=0, step=100, value=None, placeholder="Ex.: 3500")
-data_km = st.date_input("📅 Data da medição da km (opcional)", format="DD/MM/YYYY") if km_atual else None
+usar_km = st.toggle("Informei a quilometragem atual")
+km_atual = None
+data_km = None
+if usar_km:
+    km_atual = st.number_input("📍 Quilometragem atual", min_value=0, step=50)
+    data_km = st.date_input("📅 Data da medição da km", format="DD/MM/YYYY")
 
+# ---------- Funções auxiliares ----------
+def format_km_br(n: int) -> str:
+    # 6.000, 12.000 etc.
+    return f"{n:,}".replace(",", ".") + " km"
+
+# ---------- Processamento ----------
 if data_compra:
-    # Definição das revisões (meses / km)
+    ts_compra = pd.to_datetime(data_compra)
+    hoje = pd.to_datetime(date.today())
+
+    # Tabela de revisões: (número, meses, km-meta)
     intervalos = [
         (1, 6, 1000),
         (2, 12, 6000),
@@ -28,36 +42,46 @@ if data_compra:
         (9, 54, 48000),
     ]
 
-    hoje = date.today()
-    linhas = []
-
-    # Se o usuário informou km atual, calcula a média diária
+    # Média km/dia (opcional e validada)
     media_km_dia = None
-    if km_atual and data_km:
-        dias_passados = (data_km - data_compra).days
-        if dias_passados > 0:
-            media_km_dia = km_atual / dias_passados
+    if usar_km and data_km is not None:
+        ts_km = pd.to_datetime(data_km)
+        # validação básica: medição não pode ser antes da compra
+        if ts_km < ts_compra:
+            st.warning("⚠️ A 'Data da medição da km' é anterior à data de compra. "
+                       "A previsão por quilometragem será ignorada.")
+        else:
+            dias_passados = (ts_km - ts_compra).days
+            if dias_passados > 0 and km_atual is not None and km_atual > 0:
+                media_km_dia = km_atual / dias_passados
+            elif km_atual is not None and km_atual == 0:
+                media_km_dia = 0.0  # não roda nada por dia (evita divisão por zero)
 
+    linhas = []
     for numero, meses, km_meta in intervalos:
-        # Data oficial pela regra do fabricante
-        data_rev_oficial = data_compra + relativedelta(months=meses)
+        data_oficial = ts_compra + relativedelta(months=meses)  # Timestamp
+        data_prevista = data_oficial
+        base = "⏳ Prazo (meses)"
 
-        data_prevista = data_rev_oficial
-        motivo = "⏳ Prazo (meses)"
+        # Previsão por km: só considerar se temos média > 0 e uma medição válida
+        if media_km_dia is not None and media_km_dia > 0 and usar_km and data_km is not None and ts_km >= ts_compra:
+            falta_km = km_meta - (km_atual or 0)
 
-        # Se o usuário informou km, prever antecipação
-        if media_km_dia:
-            falta_km = km_meta - km_atual
-            if falta_km > 0:
-                dias_para_atingir = round(falta_km / media_km_dia)
-                data_prevista_km = data_km + pd.Timedelta(days=dias_para_atingir)
+            # Calcular o dia (inteiro) em que a meta é/foi atingida
+            if falta_km >= 0:
+                dias_para_atingir = math.ceil(falta_km / media_km_dia)
+            else:
+                # já passou da meta -> estimar quando isso aconteceu (no passado)
+                dias_para_atingir = math.floor(falta_km / media_km_dia)
 
-                # Só antecipa se cair antes da data oficial
-                if data_prevista_km < data_rev_oficial:
-                    data_prevista = data_prevista_km.date()
-                    motivo = "📍 Quilometragem"
+            data_por_km = ts_km + pd.Timedelta(days=int(dias_para_atingir))
 
-        # Status em relação a hoje
+            # Só antecipa se a data por km ocorrer ANTES da data oficial
+            if data_por_km < data_oficial:
+                data_prevista = data_por_km
+                base = "📍 Quilometragem"
+
+        # Status
         if data_prevista < hoje:
             status = "❌ Atrasada"
         elif data_prevista == hoje:
@@ -65,13 +89,14 @@ if data_compra:
         else:
             status = "✔️ Em dia"
 
-        faltam_dias = (data_prevista - hoje).days
+        faltam_dias = int((data_prevista - hoje).days)
 
         linhas.append({
             "Revisão": numero,
-            "Intervalo": f"{meses} meses ou {km_meta:,} km",
-            "Data da Revisão": pd.to_datetime(data_prevista),
-            "Base": motivo,
+            "Tipo": f"{meses} meses ou {format_km_br(km_meta)}",
+            "Data oficial (fabricante)": data_oficial,
+            "Data prevista": data_prevista,
+            "Base": base,
             "Status": status,
             "Faltam (dias)": faltam_dias
         })
@@ -83,26 +108,29 @@ if data_compra:
         df,
         hide_index=True,
         column_config={
-            "Data da Revisão": st.column_config.DateColumn("Data da Revisão", format="DD/MM/YYYY"),
-            "Faltam (dias)": st.column_config.NumberColumn("Faltam (dias)", help="Número de dias a partir de hoje"),
+            "Data oficial (fabricante)": st.column_config.DateColumn("Data oficial (fabricante)", format="DD/MM/YYYY"),
+            "Data prevista": st.column_config.DateColumn("Data prevista", format="DD/MM/YYYY"),
+            "Faltam (dias)": st.column_config.NumberColumn("Faltam (dias)", help="Dias a partir de hoje"),
         },
         use_container_width=True,
     )
 
-    # Destaque extra para revisões atrasadas
-    atrasadas = df[df["Status"].str.contains("Atrasada")]
+    # Destaque: revisões em atraso
+    atrasadas = df[df["Status"] == "❌ Atrasada"]
     if not atrasadas.empty:
         st.markdown("### 🔴 Revisões em atraso")
         for _, row in atrasadas.iterrows():
             st.markdown(
-                f"<span style='color:#d00000; font-weight:700;'>Revisão {int(row['Revisão'])} — {row['Intervalo']}: "
-                f"{row['Data da Revisão'].date().strftime('%d/%m/%Y')} ({row['Status']}, {row['Base']})</span>",
+                f"<span style='color:#d00000; font-weight:700;'>"
+                f"Revisão {int(row['Revisão'])} — {row['Tipo']}: "
+                f"{row['Data prevista'].strftime('%d/%m/%Y')} ({row['Base']})</span>",
                 unsafe_allow_html=True
             )
 
     # Download do CSV
     csv = df.copy()
-    csv["Data da Revisão"] = csv["Data da Revisão"].dt.strftime("%d/%m/%Y")
+    csv["Data oficial (fabricante)"] = csv["Data oficial (fabricante)"].dt.strftime("%d/%m/%Y")
+    csv["Data prevista"] = csv["Data prevista"].dt.strftime("%d/%m/%Y")
     st.download_button(
         "💾 Baixar cronograma (CSV)",
         data=csv.to_csv(index=False).encode("utf-8"),
@@ -110,6 +138,9 @@ if data_compra:
         mime="text/csv",
     )
 
-    st.caption("Obs.: Se informado, a quilometragem só antecipa a revisão se for antes do prazo em meses.")
+    # Info extra
+    if media_km_dia is not None:
+        st.caption(f"Média estimada: {media_km_dia:.1f} km/dia (calculada entre {ts_compra.strftime('%d/%m/%Y')} "
+                   f"e {ts_km.strftime('%d/%m/%Y')}).")
 else:
     st.info("Selecione a data de compra para gerar o cronograma.")
