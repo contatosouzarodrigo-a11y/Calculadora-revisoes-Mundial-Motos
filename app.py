@@ -5,35 +5,73 @@ from dateutil.relativedelta import relativedelta
 
 st.set_page_config(page_title="Calculadora de Revisões", page_icon="🔧", layout="centered")
 st.title("🔧 Calculadora de Revisões de Veículos")
-st.caption("Insira a data de compra e veja o cronograma de revisões. Datas passadas são destacadas em vermelho.")
+st.caption("Informe a data de compra (e opcionalmente km atual) para ver o cronograma de revisões.")
 
 # Entrada da data de compra
 data_compra = st.date_input("📅 Selecione a data de compra:", format="DD/MM/YYYY")
 
+# Campos opcionais
+km_atual = st.number_input("📍 Quilometragem atual (opcional)", min_value=0, step=100, value=None, placeholder="Ex.: 3500")
+data_km = st.date_input("📅 Data da medição da km (opcional)", format="DD/MM/YYYY") if km_atual else None
+
 if data_compra:
-    # Intervalos em meses (ex.: 6 meses ou 1k, 12 meses ou 6k, etc.)
+    # Definição das revisões (meses / km)
     intervalos = [
-        (1, 6, "1k"),
-        (2, 12, "6k"),
-        (3, 18, "12k"),
-        (4, 24, "18k"),
-        (5, 30, "24k"),
-        (6, 36, "30k"),
-        (7, 42, "36k"),
-        (8, 48, "42k"),
-        (9, 54, "48k"),
+        (1, 6, 1000),
+        (2, 12, 6000),
+        (3, 18, 12000),
+        (4, 24, 18000),
+        (5, 30, 24000),
+        (6, 36, 30000),
+        (7, 42, 36000),
+        (8, 48, 42000),
+        (9, 54, 48000),
     ]
 
     hoje = date.today()
     linhas = []
-    for numero, meses, km in intervalos:
-        data_rev = data_compra + relativedelta(months=meses)
-        status = "❌ Atrasada" if data_rev < hoje else ("⚠️ Hoje" if data_rev == hoje else "✔️ Em dia")
-        faltam_dias = (data_rev - hoje).days
+
+    # Se o usuário informou km atual, calcula a média diária
+    media_km_dia = None
+    if km_atual and data_km:
+        dias_passados = (data_km - data_compra).days
+        if dias_passados > 0:
+            media_km_dia = km_atual / dias_passados
+
+    for numero, meses, km_meta in intervalos:
+        # Data oficial pela regra do fabricante
+        data_rev_oficial = data_compra + relativedelta(months=meses)
+
+        data_prevista = data_rev_oficial
+        motivo = "⏳ Prazo (meses)"
+
+        # Se o usuário informou km, prever antecipação
+        if media_km_dia:
+            falta_km = km_meta - km_atual
+            if falta_km > 0:
+                dias_para_atingir = round(falta_km / media_km_dia)
+                data_prevista_km = data_km + pd.Timedelta(days=dias_para_atingir)
+
+                # Só antecipa se cair antes da data oficial
+                if data_prevista_km < data_rev_oficial:
+                    data_prevista = data_prevista_km.date()
+                    motivo = "📍 Quilometragem"
+
+        # Status em relação a hoje
+        if data_prevista < hoje:
+            status = "❌ Atrasada"
+        elif data_prevista == hoje:
+            status = "⚠️ Hoje"
+        else:
+            status = "✔️ Em dia"
+
+        faltam_dias = (data_prevista - hoje).days
+
         linhas.append({
             "Revisão": numero,
-            "Tipo": f"{meses} meses ou {km}",
-            "Data da Revisão": pd.to_datetime(data_rev),
+            "Intervalo": f"{meses} meses ou {km_meta:,} km",
+            "Data da Revisão": pd.to_datetime(data_prevista),
+            "Base": motivo,
             "Status": status,
             "Faltam (dias)": faltam_dias
         })
@@ -51,14 +89,14 @@ if data_compra:
         use_container_width=True,
     )
 
-    # Destaque visual: listar as atrasadas com texto vermelho
+    # Destaque extra para revisões atrasadas
     atrasadas = df[df["Status"].str.contains("Atrasada")]
     if not atrasadas.empty:
         st.markdown("### 🔴 Revisões em atraso")
         for _, row in atrasadas.iterrows():
             st.markdown(
-                f"<span style='color:#d00000; font-weight:700;'>Revisão {int(row['Revisão'])} — {row['Tipo']}: "
-                f"{row['Data da Revisão'].date().strftime('%d/%m/%Y')} (atrasada)</span>",
+                f"<span style='color:#d00000; font-weight:700;'>Revisão {int(row['Revisão'])} — {row['Intervalo']}: "
+                f"{row['Data da Revisão'].date().strftime('%d/%m/%Y')} ({row['Status']}, {row['Base']})</span>",
                 unsafe_allow_html=True
             )
 
@@ -72,6 +110,6 @@ if data_compra:
         mime="text/csv",
     )
 
-    st.caption("Obs.: As datas são calculadas por meses corridos a partir da data de compra (relativedelta).")
+    st.caption("Obs.: Se informado, a quilometragem só antecipa a revisão se for antes do prazo em meses.")
 else:
     st.info("Selecione a data de compra para gerar o cronograma.")
